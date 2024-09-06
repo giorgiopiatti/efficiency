@@ -93,34 +93,27 @@ class Translator:
 
     def raw_translate(self, text, src_lang, tgt_lang):
         def successful_pass():
-            translated_text = self.translator.translate(
-                text, src=src_lang, dest=tgt_lang
-            ).text
+            out = self.translator.translate(text, src=src_lang, dest=tgt_lang)
+            translated_text = out.text
+            if str(out._response) == "<Response [200 OK]>":
+                return translated_text, out
+            return None, out
 
-            if translated_text != text and translated_text.strip():
-                return translated_text
-
-        if_success = successful_pass()
+        if_success, out = successful_pass()
         if if_success:
             return if_success
         else:
-            import time
-
-            time.sleep(10)
-            if_success = successful_pass()
-            if if_success:
-                return if_success
-            else:
-                # print(
-                #     "[Error] Translation failed. You have very likely reached the limit of the `googletrans' "
-                #     "library. Try to wait for a while or change your IP address. Alternatively, you can also edit the "
-                #     "source code here to change it to Google cloud API by setting up your credentials.")
-                # print(src_lang, tgt_lang, text)
-                # import pdb;
-                # pdb.set_trace()
-                raise RuntimeError(
-                    "Translation failed. You have very likely reached the limit of the `googletrans` library. Try to wait for a while or change your IP address. Alternatively, you can also edit the source code here to change it to Google cloud API by setting up your credentials."
-                )
+            print(out._response)
+            # print(
+            #     "[Error] Translation failed. You have very likely reached the limit of the `googletrans' "
+            #     "library. Try to wait for a while or change your IP address. Alternatively, you can also edit the "
+            #     "source code here to change it to Google cloud API by setting up your credentials.")
+            # print(src_lang, tgt_lang, text)
+            # import pdb;
+            # pdb.set_trace()
+            raise RuntimeError(
+                "Translation failed. You have very likely reached the limit of the `googletrans` library. Try to wait for a while or change your IP address. Alternatively, you can also edit the source code here to change it to Google cloud API by setting up your credentials."
+            )
 
     def translate(
         self, text, src_lang="en", tgt_lang="de", verbose=True, enable_cache=True
@@ -355,6 +348,7 @@ class APICallCache:
 
 class Chatbot:
     model_version2engine = {
+        "gpt4o": "gpt-4o-2024-05-13",
         "gpt4": "gpt-4",
         "gpt3.5": "gpt-3.5-turbo",
         "gpt3": "text-davinci-003",
@@ -371,6 +365,7 @@ class Chatbot:
     engine2pricing = {
         "gpt-4": (0.03, 0.06, None),
         "gpt-4-32k": (0.06, 0.12, None),
+        "gpt-4o-2024-05-13": (0.005, 0.015, None),
         "gpt-3.5-turbo": (0.0015, 0.002, None),
         "gpt-3.5-turbo-16k": (0.003, 0.004, None),
         "gpt-3.5-turbo-0613": (0.0015, 0.002, None),
@@ -402,6 +397,7 @@ class Chatbot:
         import openai
 
         self.openai = openai
+        self.openai.api_version = "2020-11-07"
 
         if tracker is None:
             tracker = APICallTracker()
@@ -613,13 +609,11 @@ class Chatbot:
             return self.raw_query(*args, **kwargs)
         except openai.error.InvalidRequestError as e:
             print(f"[Error] InvalidRequestError: {e}")
-            import pdb
-
-            pdb.set_trace()
-            if len(self.dialog_history) > 10:
-                import pdb
-
-                pdb.set_trace()
+            # import pdb;
+            # pdb.set_trace()
+            # if len(self.dialog_history) > 10:
+            #     # import pdb;
+            #     # pdb.set_trace()
             for turn_i, turn in enumerate(self.dialog_history):
                 if turn["role"] == "assistant":
                     turn["content"] = turn["content"][
@@ -880,7 +874,7 @@ class Chatbot:
         max_tokens = self.max_tokens if max_tokens is None else max_tokens
         verbose = 2 if enable_pdb else verbose
 
-        if_newer_engine = engine.startswith("gpt-3.5") or engine.startswith("gpt-4")
+        if_newer_engine = "gpt-3.5" in engine or "gpt-4" in engine
         self.if_newer_engine = if_newer_engine
 
         if not continued_questions:
@@ -911,7 +905,11 @@ class Chatbot:
             openai = self.openai
             if if_newer_engine:
                 response = openai.ChatCompletion.create(
-                    model=engine,
+                    **(
+                        {"deployment_id": engine}
+                        if "azure" == openai.api_type
+                        else {"model": engine}
+                    ),
                     temperature=temperature,
                     max_tokens=max_tokens,
                     messages=self.dialog_history,
@@ -935,6 +933,220 @@ class Chatbot:
                     end_time,
                     response["usage"]["prompt_tokens"],
                     response["usage"]["completion_tokens"],
+                    model=engine,
+                )
+            )
+
+            response_text = response_text.strip()
+            if verbose:
+                self.print_cost_and_rates()
+        else:
+            response_text = ""
+
+        self.dialog_history.append(
+            {"role": "assistant", "content": response_text},
+        )
+
+        if verbose > 1:
+            print()
+            print(self.dialog_history_to_str(pure_completion_mode=pure_completion_mode))
+
+        if enable_pdb:
+            import pdb
+
+            pdb.set_trace()
+
+        if enable_api:
+            if not turn_off_cache:
+                self.cache.save_cache(cache_input, response_text)
+
+        if only_response:
+            return response_text
+        return response_text  # , output QUES: why is there an ouptut, you removed it in the previous commits?
+
+
+class AzureChatbot(Chatbot):
+    model_version2engine = {
+        # Same naming
+        "z-gpt-4o-mini-2024-07-18": "z-gpt-4o-mini-2024-07-18",
+        "z-gpt-4o-2024-08-06": "z-gpt-4o-2024-08-06",
+        "z-gpt-4-turbo-2024-04-09": "z-gpt-4-turbo-2024-04-09",
+        "z-gpt-3-5-turbo-1106": "z-gpt-3-5-turbo-1106",
+        "z-gpt-4-0613": "z-gpt-4-0613",
+    }
+
+    engine2pricing = {
+        "z-gpt-4o-mini-2024-07-18": (0.00015, 0.0006, None),
+        "z-gpt-4o-2024-08-06": (0.005, 0.015, None),
+        "z-gpt-4-turbo-2024-04-09": (0.01, 0.03, None),
+        "z-gpt-3-5-turbo-1106": (0.001, 0.002, None),
+        "z-gpt-4-0613": (0.03, 0.06, None),
+    }
+
+    def __init__(
+        self,
+        model_version="gpt3.5",
+        max_tokens=100,
+        output_file=None,
+        output_folder="./",
+        system_prompt="You are a helpful assistant.",
+        cache_files=[],
+        openai_key_alias="OPENAI_API_KEY",
+        openai_org_alias="OPENAI_ORG_ID",
+        tracker=None,
+        cache=None,
+    ):
+        super().__init__(
+            model_version,
+            max_tokens,
+            output_file,
+            output_folder,
+            system_prompt,
+            cache_files,
+            openai_key_alias,
+            openai_org_alias,
+            tracker,
+            cache,
+        )
+
+        # self.openai.api_type = 'azure'
+        # import os
+        # self.openai.api_key = "f8e0702ca34d420b8b52258a81a28660" # os.environ['AZURE_API_KEY']
+        # self.openai.api_base = "https://openai-zjin-5.openai.azure.com/" #os.environ['AZURE_API_BASE']
+        # self.openai.api_version = "2024-02-01" # os.environ['AZURE_API_VERSION']
+        import os
+
+        from openai import AzureOpenAI
+
+        # Load environment variables from ENV
+        if "z-gpt-4o-mini-2024-07-18" == model_version:
+            azure_endpoint = os.environ.get("AZURE_ENDPOINT_GPT_4o_mini_2024_07_18")
+            azure_key = os.environ.get("AZURE_KEY_GPT_4o_mini_2024_07_18")
+            api_version = "2024-02-01"
+        elif "z-gpt-4o-2024-08-06" == model_version:
+            azure_endpoint = os.environ.get("AZURE_ENDPOINT_GPT_4O_2024_08_06")
+            azure_key = os.environ.get("AZURE_KEY_GPT_4O_2024_08_06")
+            api_version = "2024-02-01"
+        elif "z-gpt-4-turbo-2024-04-09":
+            azure_endpoint = os.environ.get("AZURE_ENDPOINT_GPT_4_turbo_2024_04_09")
+            azure_key = os.environ.get("AZURE_KEY_GPT_4_turbo_2024_04_09")
+            api_version = "2024-02-01"
+        elif "z-gpt-35-turbo-1106":
+            azure_endpoint = os.environ.get("AZURE_ENDPOINT_GPT_3_5_turbo_1106")
+            azure_key = os.environ.get("AZURE_KEY_GPT_3_5_turbo_1106")
+            api_version = "2024-02-01"
+        elif "z-gpt-4-0613":
+            azure_endpoint = os.environ.get("AZURE_ENDPOINT_GPT_4_0613")
+            azure_key = os.environ.get("AZURE_KEY_GPT_4_0613")
+            api_version = "2024-02-01"
+        else:
+            raise ValueError(f"model_version {model_version} is not supported.")
+
+        self.openai = AzureOpenAI(
+            api_version=api_version,
+            api_key=azure_key,
+            azure_endpoint=azure_endpoint,
+        )
+
+    def raw_query(
+        self,
+        question,
+        system_prompt=None,
+        turn_off_cache=False,
+        valid_ways=["cache", "api_call"],
+        continued_questions=False,
+        max_tokens=None,
+        stop_sign="\nQ: ",
+        model_version=[None, "gpt3", "gpt3.5", "gpt4"][0],
+        engine=[
+            None,
+            "text-davinci-003",
+            "gpt-3.5-turbo",
+            "gpt-4-32k-0314",
+            "gpt-4-0314",
+            "gpt-4",
+        ][0],
+        enable_pdb=False,
+        verbose=1,
+        only_response=True,
+        temperature=0.0,
+        pure_completion_mode=False,
+    ):
+        if verbose < 0 or verbose > 2:
+            raise ValueError(
+                "verbose must be 0, 1 or 2. 0=quiet, 1=print cost and rates, 2=print cost, rates and response."
+            )
+
+        if temperature < 0.0 or temperature > 1.0:
+            raise ValueError("temperature must be between 0 and 1.")
+
+        if temperature != 0.0 and not turn_off_cache:
+            raise ValueError("turn_off_cache must be True when temperature != 0.")
+
+        if system_prompt is not None:
+            self.set_system_prompt(system_prompt)
+        if model_version is not None:
+            if model_version != self.model_version:
+                turn_off_cache = True
+
+        enable_api = "api_call" in valid_ways
+        if model_version is not None:
+            engine = self.model_version2engine.get(model_version, model_version)
+        elif engine is not None:
+            engine = engine
+        else:
+            engine = self.engine
+        self.engine = engine  # to be called in print_cost()
+
+        max_tokens = self.max_tokens if max_tokens is None else max_tokens
+        verbose = 2 if enable_pdb else verbose
+
+        if_newer_engine = True
+        self.if_newer_engine = if_newer_engine
+
+        if not continued_questions:
+            self.clear_dialog_history()
+
+        self.dialog_history.append(
+            {"role": "user", "content": question},
+        )
+
+        prompt = self.dialog_history_to_str(pure_completion_mode=pure_completion_mode)
+        cache_input = prompt
+
+        # turn_off_cache = True
+        if enable_pdb:
+            print(cache_input)
+            import pdb
+
+            pdb.set_trace()
+        if (cache_input in self.cache) & (not turn_off_cache):
+            response_text = self.cache[cache_input]
+            if not if_newer_engine:
+                response_text = str(response_text).split(stop_sign, 1)[0]
+            response_text = response_text.strip()
+            if verbose:
+                print(f'[Info] Using cache for "{cache_input[:10]}..."')
+        elif enable_api:
+            start_time = time.time()
+
+            openai = self.openai
+
+            response = openai.chat.completions.create(
+                model=engine,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                messages=self.dialog_history,
+            )
+            response_text = response.choices[0].message.content
+
+            end_time = time.time()
+            self.tracker.add_call(
+                APICall(
+                    start_time,
+                    end_time,
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
                     model=engine,
                 )
             )
