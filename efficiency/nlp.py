@@ -4,6 +4,7 @@ import multiprocessing
 import time
 
 from efficiency.log import show_var
+from tqdm import tqdm
 
 
 class NLP:
@@ -359,6 +360,11 @@ class Chatbot:
         "gpt3.03": "curie",
         "gpt3.02": "babbage",
         "gpt3.01": "ada",
+        "gpt-4o-mini-2024-07-18": "gpt-4o-mini-2024-07-18",
+        "gpt-4o-2024-08-06": "gpt-4o-2024-08-06",
+        "gpt-4-turbo-2024-04-09": "gpt-4-turbo-2024-04-09",
+        "gpt-3-5-turbo-1106": "gpt-3-5-turbo-1106",
+        "gpt-4-0613": "gpt-4-0613",
     }
 
     # model -> (1000_input_tokens, 1000_output_tokens, 1000_training_tokens) prices
@@ -377,6 +383,11 @@ class Chatbot:
         "text-davinci-001": (0.02, 0.02, None),
         "text-davinci-002": (0.02, 0.02, None),
         "text-davinci-003": (0.02, 0.02, None),
+        "gpt-4o-mini-2024-07-18": (0.00015, 0.0006, None),
+        "gpt-4o-2024-08-0": (0.005, 0.015, None),
+        "gpt-4-turbo-2024-04-09": (0.01, 0.03, None),
+        "gpt-3-5-turbo-1106": (0.001, 0.002, None),
+        "gpt-4-0613": (0.03, 0.06, None),
     }
 
     def __init__(
@@ -394,20 +405,16 @@ class Chatbot:
     ):
         import os
 
-        import openai
-
-        self.openai = openai
-        self.openai.api_version = "2020-11-07"
+        from openai import OpenAI
 
         if tracker is None:
             tracker = APICallTracker()
 
-        api_key = os.environ[openai_key_alias]
-        openai.api_key = api_key
-        if openai_org_alias != "OPENAI_ORG_ID":
-            organization_id = os.environ[openai_org_alias]
-            openai.organization = organization_id
+        api_key = (
+            os.environ[openai_key_alias] if openai_key_alias in os.environ else None
+        )
 
+        self.openai = OpenAI(api_key=api_key)
         self.model_version = model_version
         self.engine = self.model_version2engine.get(model_version, model_version)
         self.max_tokens = max_tokens
@@ -607,22 +614,10 @@ class Chatbot:
 
         try:
             return self.raw_query(*args, **kwargs)
-        except openai.error.InvalidRequestError as e:
-            print(f"[Error] InvalidRequestError: {e}")
-            # import pdb;
-            # pdb.set_trace()
-            # if len(self.dialog_history) > 10:
-            #     # import pdb;
-            #     # pdb.set_trace()
-            for turn_i, turn in enumerate(self.dialog_history):
-                if turn["role"] == "assistant":
-                    turn["content"] = turn["content"][
-                        :1000
-                    ]  # TODO: QUES: DAVE: why 1000? @zhijing-jin
-        except openai.error.RateLimitError as e:
+        except openai.RateLimitError as e:
             return rate_limit_error(e)
-        except openai.error.APIError as e:
-            return api_error(e)
+        except openai.APIError as e:
+            return ""
         except Exception as e:
             print(f"[Error] Unknown exception when calling openai: {e}")
             # raise e # if there is an unknown error, we should stop the program
@@ -903,20 +898,16 @@ class Chatbot:
             start_time = time.time()
 
             openai = self.openai
-            if if_newer_engine:
-                response = openai.ChatCompletion.create(
-                    **(
-                        {"deployment_id": engine}
-                        if "azure" == openai.api_type
-                        else {"model": engine}
-                    ),
+            if True:
+                response = openai.chat.completions.create(
+                    model=engine,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     messages=self.dialog_history,
                 )
-                response_text = response["choices"][0]["message"]["content"]
+                response_text = response.choices[0].message.content
             else:
-                response = openai.Completion.create(
+                response = openai.chat.completions.create(
                     model=engine,
                     # prompt=[question],
                     prompt=prompt,
@@ -931,8 +922,8 @@ class Chatbot:
                 APICall(
                     start_time,
                     end_time,
-                    response["usage"]["prompt_tokens"],
-                    response["usage"]["completion_tokens"],
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
                     model=engine,
                 )
             )
@@ -964,12 +955,46 @@ class Chatbot:
             return response_text
         return response_text  # , output QUES: why is there an ouptut, you removed it in the previous commits?
 
+    def ask_batch(self, queries):
+        res = []
+        for query in tqdm(queries):
+            res.append(self.ask(query))
+        self.save_stats_to_json()
+        return res
+
+    def save_stats_to_json(self):
+        import json
+        import os
+        import uuid
+
+        stats = {
+            "total_cost": round(self._total_cost, 3),
+            "num_tokens": self.tracker.num_tokens,
+            "num_in_tokens": self.tracker.num_in_tokens,
+            "num_out_tokens": self.tracker.num_out_tokens,
+            "num_requests": self.tracker.num_requests,
+            "tokens_per_second": round(self.tracker.tokens_per_second(), 1),
+            "requests_per_second": round(self.tracker.requests_per_second(), 1),
+        }
+
+        # Ensure the api_usage folder exists
+        os.makedirs("api_usage", exist_ok=True)
+
+        # Generate a random UUID for the filename
+        random_uid = str(uuid.uuid4())
+        filename = f"stats_{random_uid}.json"
+
+        # Save the stats to a JSON file with the random UID in the api_usage folder
+        file_path = os.path.join("api_usage", filename)
+        with open(file_path, "w") as f:
+            json.dump(stats, f, indent=2)
+
 
 class AzureChatbot(Chatbot):
     model_version2engine = {
         # Same naming
         "z-gpt-4o-mini-2024-07-18": "z-gpt-4o-mini-2024-07-18",
-        "z-gpt-4o-2024-08-06": "z-gpt-4o-2024-08-06",
+        "z-gpt-4o-2024-08-06": "z-gpt-4o-2024-08-0",
         "z-gpt-4-turbo-2024-04-09": "z-gpt-4-turbo-2024-04-09",
         "z-gpt-3-5-turbo-1106": "z-gpt-3-5-turbo-1106",
         "z-gpt-4-0613": "z-gpt-4-0613",
@@ -977,7 +1002,7 @@ class AzureChatbot(Chatbot):
 
     engine2pricing = {
         "z-gpt-4o-mini-2024-07-18": (0.00015, 0.0006, None),
-        "z-gpt-4o-2024-08-06": (0.005, 0.015, None),
+        "z-gpt-4o-2024-08-0": (0.005, 0.015, None),
         "z-gpt-4-turbo-2024-04-09": (0.01, 0.03, None),
         "z-gpt-3-5-turbo-1106": (0.001, 0.002, None),
         "z-gpt-4-0613": (0.03, 0.06, None),
@@ -1024,8 +1049,8 @@ class AzureChatbot(Chatbot):
             azure_key = os.environ.get("AZURE_KEY_GPT_4o_mini_2024_07_18")
             api_version = "2024-02-01"
         elif "z-gpt-4o-2024-08-06" == model_version:
-            azure_endpoint = os.environ.get("AZURE_ENDPOINT_GPT_4O_2024_08_06")
-            azure_key = os.environ.get("AZURE_KEY_GPT_4O_2024_08_06")
+            azure_endpoint = os.environ.get("AZURE_ENDPOINT_GPT_4o_2024_08_06")
+            azure_key = os.environ.get("AZURE_KEY_GPT_4o_2024_08_06")
             api_version = "2024-02-01"
         elif "z-gpt-4-turbo-2024-04-09":
             azure_endpoint = os.environ.get("AZURE_ENDPOINT_GPT_4_turbo_2024_04_09")
